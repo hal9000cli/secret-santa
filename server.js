@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import session from 'express-session';
+import rateLimit from 'express-rate-limit';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import fs from 'fs/promises';
@@ -28,6 +29,23 @@ if (!existsSync(CONFIG_FILE)) {
     }));
 }
 
+// Environment variable validation
+if (process.env.NODE_ENV === 'production') {
+    const defaultSecret = 'secret-santa-session-key-change-in-production';
+    if (!process.env.SESSION_SECRET || process.env.SESSION_SECRET === defaultSecret) {
+        console.warn('\n⚠️  WARNING: Using default SESSION_SECRET in production!');
+        console.warn('   Please set SESSION_SECRET environment variable to a random string.');
+        console.warn('   Generate one with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"');
+        console.warn('   This is a security risk!\n');
+    }
+}
+
+// Input sanitization helper
+function sanitizeInput(input, maxLength = 500) {
+    if (typeof input !== 'string') return '';
+    return input.trim().slice(0, maxLength);
+}
+
 // Middleware
 // Trust proxy - needed when behind nginx/apache handling SSL
 if (process.env.NODE_ENV === 'production') {
@@ -38,7 +56,25 @@ app.use(cors({
     origin: process.env.NODE_ENV === 'production' ? false : ['http://localhost:5173', 'http://localhost:5174', 'http://localhost:5175', 'http://localhost:5176', 'http://localhost:5177', 'http://localhost:5178', 'http://localhost:5179'],
     credentials: true
 }));
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
+
+// Rate limiting for auth endpoints
+const authLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 10, // Limit each IP to 10 requests per windowMs
+    message: 'Too many login attempts, please try again later.',
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+
+// Rate limiting for admin endpoints
+const adminLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 5, // Limit each IP to 5 requests per windowMs
+    message: 'Too many admin requests, please try again later.',
+    standardHeaders: true,
+    legacyHeaders: false,
+});
 app.use(session({
     secret: process.env.SESSION_SECRET || 'secret-santa-session-key-change-in-production',
     resave: false,
@@ -158,7 +194,7 @@ function requireAuth(req, res, next) {
 // ==================== AUTH ROUTES ====================
 
 // Create or get user session
-app.post('/api/auth/login', async (req, res) => {
+app.post('/api/auth/login', authLimiter, async (req, res) => {
     try {
         const { displayName, recoveryCode } = req.body;
 
@@ -233,9 +269,9 @@ app.put('/api/users/me', requireAuth, async (req, res) => {
 
         users[req.session.userId] = {
             ...users[req.session.userId],
-            displayName: displayName || users[req.session.userId].displayName,
-            wishlist: wishlist !== undefined ? wishlist : users[req.session.userId].wishlist,
-            dislikes: dislikes !== undefined ? dislikes : users[req.session.userId].dislikes
+            displayName: sanitizeInput(displayName, 100) || users[req.session.userId].displayName,
+            wishlist: sanitizeInput(wishlist, 1000) || users[req.session.userId].wishlist,
+            dislikes: sanitizeInput(dislikes, 1000) || users[req.session.userId].dislikes
         };
 
         await writeUsers(users, req.session.adminPassword);
@@ -264,20 +300,15 @@ app.get('/api/users/:userId', requireAuth, async (req, res) => {
 // Get all groups for current user
 app.get('/api/groups', requireAuth, async (req, res) => {
     try {
-        console.log('GET /api/groups - userId:', req.session.userId, 'adminPassword:', req.session.adminPassword);
-
         if (!req.session.adminPassword) {
-            console.error('No adminPassword in session for user:', req.session.userId);
             return res.status(500).json({ error: 'Session missing admin context' });
         }
 
         const groups = await readGroups(req.session.adminPassword);
-        console.log('Found groups:', Object.keys(groups));
 
         const userGroups = Object.values(groups).filter(group =>
             group.participants.some(p => p.userId === req.session.userId)
         );
-        console.log('User groups for', req.session.userId, ':', userGroups.map(g => g.id));
 
         res.json(userGroups);
     } catch (error) {
@@ -311,10 +342,11 @@ app.get('/api/groups/:groupId', requireAuth, async (req, res) => {
 app.post('/api/groups', requireAuth, async (req, res) => {
     try {
         const { name } = req.body;
+        const sanitizedName = sanitizeInput(name, 100);
         const users = await readUsers(req.session.adminPassword);
         const currentUser = users[req.session.userId];
 
-        if (!name || !name.trim()) {
+        if (!sanitizedName) {
             return res.status(400).json({ error: 'Group name is required' });
         }
 
@@ -323,7 +355,7 @@ app.post('/api/groups', requireAuth, async (req, res) => {
 
         groups[groupId] = {
             id: groupId,
-            name: name.trim(),
+            name: sanitizedName,
             adminId: req.session.userId,
             status: 'SETUP',
             participants: [{
@@ -395,13 +427,23 @@ app.put('/api/groups/:groupId/exclusions', requireAuth, async (req, res) => {
     }
 });
 
+// Fisher-Yates shuffle algorithm for unbiased randomization
+function shuffle(array) {
+    const arr = [...array];
+    for (let i = arr.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr;
+}
+
 // Drawing algorithm
 function findDerangement(participants, exclusions) {
     const ids = participants.map(p => p.userId);
     const maxAttempts = 1000;
 
     for (let i = 0; i < maxAttempts; i++) {
-        const shuffled = [...ids].sort(() => Math.random() - 0.5);
+        const shuffled = shuffle(ids);
         let isValid = true;
         const mapping = {};
 
@@ -471,6 +513,7 @@ app.post('/api/groups/:groupId/draw', requireAuth, async (req, res) => {
 app.put('/api/groups/:groupId/participants/me', requireAuth, async (req, res) => {
     try {
         const { name } = req.body;
+        const sanitizedName = sanitizeInput(name, 100);
         const groups = await readGroups(req.session.adminPassword);
         const group = groups[req.params.groupId];
 
@@ -483,7 +526,7 @@ app.put('/api/groups/:groupId/participants/me', requireAuth, async (req, res) =>
             return res.status(403).json({ error: 'Not a member of this group' });
         }
 
-        group.participants[participantIndex].name = name;
+        group.participants[participantIndex].name = sanitizedName;
         await writeGroups(groups, req.session.adminPassword);
         res.json(group);
     } catch (error) {
@@ -494,7 +537,7 @@ app.put('/api/groups/:groupId/participants/me', requireAuth, async (req, res) =>
 // ==================== ADMIN ROUTES ====================
 
 // Get all system data (Admin only)
-app.get('/api/admin/data', async (req, res) => {
+app.get('/api/admin/data', adminLimiter, async (req, res) => {
     try {
         const password = req.headers['x-admin-password'];
         if (!await isValidAdminPassword(password)) {
@@ -624,8 +667,8 @@ app.put('/api/admin/groups/:groupId', async (req, res) => {
 
         if (!group) return res.status(404).json({ error: 'Group not found' });
 
-        if (name) group.name = name.trim();
-        if (budget !== undefined) group.budget = budget;
+        if (name) group.name = sanitizeInput(name, 100);
+        if (budget !== undefined) group.budget = sanitizeInput(budget, 50);
 
         await writeGroups(groups, password);
         res.json(group);
@@ -641,15 +684,18 @@ app.post('/api/admin/groups', async (req, res) => {
         if (!await isValidAdminPassword(password)) return res.status(401).json({ error: 'Invalid admin password' });
 
         const { name, budget } = req.body;
-        if (!name || !name.trim()) return res.status(400).json({ error: 'Group name is required' });
+        const sanitizedName = sanitizeInput(name, 100);
+        const sanitizedBudget = sanitizeInput(budget, 50);
+
+        if (!sanitizedName) return res.status(400).json({ error: 'Group name is required' });
 
         const groupId = generateId();
         const groups = await readGroups(password);
 
         groups[groupId] = {
             id: groupId,
-            name: name.trim(),
-            budget: budget || '0',
+            name: sanitizedName,
+            budget: sanitizedBudget || '0',
             adminId: 'admin', // System admin
             status: 'SETUP',
             participants: [],
@@ -672,7 +718,9 @@ app.post('/api/admin/groups/:groupId/participants', async (req, res) => {
         if (!await isValidAdminPassword(password)) return res.status(401).json({ error: 'Invalid admin password' });
 
         const { name } = req.body;
-        if (!name || !name.trim()) return res.status(400).json({ error: 'Name is required' });
+        const sanitizedName = sanitizeInput(name, 100);
+
+        if (!sanitizedName) return res.status(400).json({ error: 'Name is required' });
 
         const groups = await readGroups(password);
         const group = groups[req.params.groupId];
@@ -684,7 +732,7 @@ app.post('/api/admin/groups/:groupId/participants', async (req, res) => {
         const users = await readUsers(password);
 
         users[userId] = {
-            displayName: name.trim(),
+            displayName: sanitizedName,
             wishlist: '',
             dislikes: '',
             recoveryCode: recoveryCode,
@@ -694,7 +742,7 @@ app.post('/api/admin/groups/:groupId/participants', async (req, res) => {
         // Add to group
         group.participants.push({
             userId: userId,
-            name: name.trim()
+            name: sanitizedName
         });
 
         await writeUsers(users, password);
@@ -771,24 +819,6 @@ app.get('/api/admin/config', async (req, res) => {
     }
 });
 
-// Update config (Admin only)
-app.put('/api/admin/config', async (req, res) => {
-    try {
-        const password = req.headers['x-admin-password'];
-        if (!await isValidAdminPassword(password)) return res.status(401).json({ error: 'Invalid admin password' });
-
-        const { title } = req.body;
-        const config = await readConfig();
-
-        if (title !== undefined) config.title = title;
-
-        await writeConfig(config);
-        res.json(config);
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
 // Serve React app for all other routes in production
 if (process.env.NODE_ENV === 'production') {
     app.get('*', (req, res) => {
@@ -798,5 +828,7 @@ if (process.env.NODE_ENV === 'production') {
 
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`🎅 Secret Santa server running on http://0.0.0.0:${PORT}`);
-    console.log(`📁 Data directory: ${DATA_DIR}`);
+    if (process.env.NODE_ENV !== 'production') {
+        console.log(`📁 Data directory: ${DATA_DIR}`);
+    }
 });

@@ -217,16 +217,6 @@ const api = {
     });
     if (!res.ok) throw new Error('Failed to get config');
     return res.json();
-  },
-
-  async adminUpdateConfig(password, data) {
-    const res = await fetch(`${API_BASE}/admin/config`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json', 'x-admin-password': password },
-      body: JSON.stringify(data)
-    });
-    if (!res.ok) throw new Error('Failed to update config');
-    return res.json();
   }
 };
 
@@ -379,7 +369,7 @@ export default function App() {
           setFrontTitle(config.title || "Macnamara's Secret Santa!");
         }
       } catch (err) {
-        console.log('Could not fetch title, using default');
+        // Silently fail, use default title
       }
     };
     fetchTitle();
@@ -448,7 +438,7 @@ export default function App() {
     if (activeGroupId && view === 'GROUP_DETAIL') {
       const interval = setInterval(() => {
         fetchGroup(activeGroupId);
-      }, 2000); // Poll every 2 seconds
+      }, 5000); // Poll every 5 seconds
       return () => clearInterval(interval);
     }
   }, [activeGroupId, view]);
@@ -868,18 +858,7 @@ export default function App() {
       }
     };
 
-    const handleUpdateTitle = async () => {
-      const newTitle = prompt("Enter new front page title:", frontTitle);
-      if (newTitle === null || newTitle === frontTitle) return;
 
-      try {
-        await api.adminUpdateConfig(adminPassword, { title: newTitle });
-        setFrontTitle(newTitle);
-        alert('Title updated successfully! Click "Exit Admin" and the login page will show the new title.');
-      } catch (err) {
-        alert(err.message);
-      }
-    };
 
     return (
       <div className="min-h-screen bg-slate-900 p-3 sm:p-6">
@@ -887,20 +866,12 @@ export default function App() {
           {/* Header - Mobile Optimized */}
           <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3">
             <h1 className="text-2xl sm:text-3xl font-bold text-white">Admin Dashboard</h1>
-            <div className="flex gap-2 flex-wrap">
-              <button
-                onClick={handleUpdateTitle}
-                className="flex-1 sm:flex-none bg-slate-700 hover:bg-slate-600 text-white font-medium py-2 px-4 rounded-lg text-sm transition-colors"
-              >
-                Edit Title
-              </button>
-              <button
-                onClick={() => window.location.href = '/'}
-                className="flex-1 sm:flex-none border-2 border-slate-600 text-slate-300 hover:border-slate-500 hover:text-white font-medium py-2 px-4 rounded-lg text-sm transition-colors"
-              >
-                Exit Admin
-              </button>
-            </div>
+            <button
+              onClick={() => window.location.href = '/'}
+              className="border-2 border-slate-600 text-slate-300 hover:border-slate-500 hover:text-white font-medium py-2 px-4 rounded-lg text-sm transition-colors"
+            >
+              Exit Admin
+            </button>
           </div>
 
           {/* Create Group Section - Mobile Optimized */}

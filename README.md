@@ -66,17 +66,30 @@ A beautiful, full-featured Secret Santa application built with React and Node.js
 
 ### Production Deployment
 
-1. **Build the frontend**
+1. **Set up environment variables**
+   
+   Create a `.env` file (see `.env.example` for reference):
+   ```bash
+   # Generate a secure session secret
+   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+   
+   # Add to .env file
+   echo "SESSION_SECRET=your-generated-secret-here" > .env
+   echo "NODE_ENV=production" >> .env
+   echo "PORT=3000" >> .env
+   ```
+
+2. **Build the frontend**
    ```bash
    npm run build
    ```
 
-2. **Start the production server**
+3. **Start the production server**
    ```bash
-   NODE_ENV=production npm start
+   npm start
    ```
 
-3. **Configure your web server** (nginx example)
+4. **Configure your web server** (nginx example)
    ```nginx
    server {
        listen 443 ssl;
@@ -89,6 +102,8 @@ A beautiful, full-featured Secret Santa application built with React and Node.js
            proxy_set_header Connection 'upgrade';
            proxy_set_header Host $host;
            proxy_cache_bypass $http_upgrade;
+           proxy_set_header X-Real-IP $remote_addr;
+           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
        }
    }
    ```
@@ -182,10 +197,13 @@ Each group is completely separate with its own participants, groups, and data!
 
 - **Password-based admin access** - Only authorized users can manage groups
 - **Unique recovery codes** - Secure, memorable 6-character codes for participants
-- **Session management** - Secure cookie-based sessions
+- **Session management** - Secure cookie-based sessions with httpOnly flags
 - **Data isolation** - Complete separation between different admin instances
 - **HTTPS support** - Production-ready SSL configuration
 - **No database required** - Simple file-based storage (easily auditable)
+- **Rate limiting** - Protection against brute force attacks on login and admin endpoints
+- **Input sanitization** - All user inputs are validated and sanitized
+- **Request size limits** - Protection against large payload attacks
 
 ## 📝 Configuration
 
@@ -257,13 +275,16 @@ Edit `src/index.css` to customize colors, fonts, and animations:
 
 ### Modifying the Title
 
-Update `data/config.json`:
+The application title is configured in `data/config.json`:
 
 ```json
 {
-  "title": "Your Custom Title Here!"
+  "title": "Your Custom Title Here!",
+  "adminPasswords": ["password1", "password2"]
 }
 ```
+
+**Note:** The title can only be changed by editing the `config.json` file directly. After changing it, restart the server for the new title to take effect.
 
 ## 🤝 Contributing
 
